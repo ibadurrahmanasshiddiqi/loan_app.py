@@ -1,13 +1,12 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-from sklearn.preprocessing import StandardScaler, LabelEncoder
+from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import train_test_split
-from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
+from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
 import plotly.express as px
 import plotly.graph_objects as go
-from datetime import datetime
 
 # Set page configuration
 st.set_page_config(
@@ -16,102 +15,84 @@ st.set_page_config(
     layout="wide"
 )
 
-# Fungsi untuk generate dummy data (untuk demo)
-@st.cache_data
-def generate_dummy_data(n_samples=1000):
-    np.random.seed(42)
-    
-    data = {
-        'pendapatan_bulanan': np.random.randint(3000000, 20000000, n_samples),
-        'usia': np.random.randint(21, 65, n_samples),
-        'jumlah_tanggungan': np.random.randint(0, 6, n_samples),
-        'lama_bekerja_tahun': np.random.randint(0, 30, n_samples),
-        'total_pinjaman': np.random.randint(5000000, 200000000, n_samples),
-        'angsuran_bulanan': np.random.randint(500000, 10000000, n_samples),
-        'riwayat_kredit_score': np.random.randint(300, 850, n_samples),
-        'jumlah_pinjaman_aktif': np.random.randint(0, 5, n_samples),
-        'kepemilikan_rumah': np.random.choice(['Milik Sendiri', 'Sewa', 'Keluarga'], n_samples),
-        'status_pekerjaan': np.random.choice(['Tetap', 'Kontrak', 'Wiraswasta'], n_samples),
-        'pendidikan': np.random.choice(['SMA', 'D3', 'S1', 'S2'], n_samples),
-    }
-    
-    df = pd.DataFrame(data)
-    
-    # Hitung debt to income ratio
-    df['debt_to_income_ratio'] = (df['angsuran_bulanan'] / df['pendapatan_bulanan']) * 100
-    
-    # Generate target: angsuran ke berapa akan menunggak (0 = tidak menunggak)
-    # Logika: semakin tinggi DTI, credit score rendah, pinjaman banyak = lebih cepat menunggak
-    risk_score = (
-        (df['debt_to_income_ratio'] / 100) * 40 +
-        ((850 - df['riwayat_kredit_score']) / 850) * 30 +
-        (df['jumlah_pinjaman_aktif'] / 5) * 20 +
-        (df['jumlah_tanggungan'] / 6) * 10
-    )
-    
-    # Konversi ke kategori menunggak
-    df['bulan_menunggak'] = 0
-    df.loc[risk_score > 70, 'bulan_menunggak'] = np.random.randint(1, 4, (risk_score > 70).sum())
-    df.loc[(risk_score > 55) & (risk_score <= 70), 'bulan_menunggak'] = np.random.randint(4, 7, ((risk_score > 55) & (risk_score <= 70)).sum())
-    df.loc[(risk_score > 40) & (risk_score <= 55), 'bulan_menunggak'] = np.random.randint(7, 13, ((risk_score > 40) & (risk_score <= 55)).sum())
-    
-    # Kategori risiko
-    df['kategori_risiko'] = 'Lancar'
-    df.loc[df['bulan_menunggak'] > 0, 'kategori_risiko'] = 'Risiko Tinggi (1-3 bulan)'
-    df.loc[df['bulan_menunggak'] >= 4, 'kategori_risiko'] = 'Risiko Sedang (4-6 bulan)'
-    df.loc[df['bulan_menunggak'] >= 7, 'kategori_risiko'] = 'Risiko Rendah (7-12 bulan)'
-    
-    return df
-
 # Load and prepare data
 @st.cache_data
 def load_and_prepare_data():
-    # Generate dummy data
-    df = generate_dummy_data(1000)
+    # Load German Credit Data from UCI
+    url = "https://archive.ics.uci.edu/ml/machine-learning-databases/statlog/german/german.data"
     
-    # Prepare features
+    # Column names based on UCI documentation
+    columns = [
+        'status_checking', 'duration', 'credit_history', 'purpose', 'credit_amount',
+        'savings', 'employment', 'installment_rate', 'personal_status', 'other_debtors',
+        'residence_since', 'property', 'age', 'other_installments', 'housing',
+        'existing_credits', 'job', 'num_dependents', 'telephone', 'foreign_worker', 'target'
+    ]
+    
+    df = pd.read_csv(url, sep=' ', header=None, names=columns)
+    
+    # Target: 1 = Good, 2 = Bad -> Convert to 0 = Good, 1 = Bad (default)
+    df['target'] = df['target'].map({1: 0, 2: 1})
+    
+    # Create interpretable features for display
+    df_display = df.copy()
+    
+    # Convert codes to readable format
+    status_map = {'A11': '< 0 DM', 'A12': '0-200 DM', 'A13': '>= 200 DM', 'A14': 'Tidak Ada'}
+    purpose_map = {'A40': 'Mobil Baru', 'A41': 'Mobil Bekas', 'A42': 'Furniture', 'A43': 'TV/Radio', 
+                   'A44': 'Alat Rumah Tangga', 'A45': 'Perbaikan', 'A46': 'Pendidikan', 
+                   'A48': 'Pelatihan', 'A49': 'Bisnis', 'A410': 'Lainnya'}
+    
+    # Encode categorical features untuk modeling
+    from sklearn.preprocessing import LabelEncoder
+    le_dict = {}
+    categorical_cols = ['status_checking', 'credit_history', 'purpose', 'savings', 
+                       'employment', 'personal_status', 'other_debtors', 'property',
+                       'other_installments', 'housing', 'job', 'telephone', 'foreign_worker']
+    
     df_encoded = df.copy()
+    for col in categorical_cols:
+        le = LabelEncoder()
+        df_encoded[col] = le.fit_transform(df[col].astype(str))
+        le_dict[col] = le
     
-    # Label encoding untuk categorical features
-    le_rumah = LabelEncoder()
-    le_pekerjaan = LabelEncoder()
-    le_pendidikan = LabelEncoder()
+    # Select features
+    X = df_encoded.drop('target', axis=1)
+    y = df_encoded['target']
     
-    df_encoded['kepemilikan_rumah_encoded'] = le_rumah.fit_transform(df_encoded['kepemilikan_rumah'])
-    df_encoded['status_pekerjaan_encoded'] = le_pekerjaan.fit_transform(df_encoded['status_pekerjaan'])
-    df_encoded['pendidikan_encoded'] = le_pendidikan.fit_transform(df_encoded['pendidikan'])
-    
-    # Select features for model
-    feature_columns = ['pendapatan_bulanan', 'usia', 'jumlah_tanggungan', 'lama_bekerja_tahun',
-                      'total_pinjaman', 'angsuran_bulanan', 'riwayat_kredit_score',
-                      'jumlah_pinjaman_aktif', 'debt_to_income_ratio',
-                      'kepemilikan_rumah_encoded', 'status_pekerjaan_encoded', 'pendidikan_encoded']
-    
-    X = df_encoded[feature_columns]
-    y = df_encoded['bulan_menunggak']
-    
-    # Standardize features
+    # Standardize
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(X)
     
     # Split data
     X_train, X_test, y_train, y_test = train_test_split(
-        X_scaled, y, test_size=0.2, random_state=42
+        X_scaled, y, test_size=0.2, random_state=42, stratify=y
     )
     
-    # Train model
-    model = RandomForestClassifier(n_estimators=100, max_depth=15, random_state=42)
+    # Train model with better parameters
+    model = RandomForestClassifier(
+        n_estimators=200, 
+        max_depth=10, 
+        min_samples_split=10,
+        min_samples_leaf=5,
+        random_state=42,
+        class_weight='balanced'
+    )
     model.fit(X_train, y_train)
     
     # Calculate accuracy
     y_pred = model.predict(X_test)
-    accuracy = accuracy_score(y_test, y_pred)
+    y_pred_train = model.predict(X_train)
     
-    return model, scaler, df, X_test, y_test, y_pred, accuracy, feature_columns, le_rumah, le_pekerjaan, le_pendidikan
+    accuracy_test = accuracy_score(y_test, y_pred)
+    accuracy_train = accuracy_score(y_train, y_pred_train)
+    
+    return model, scaler, df, df_display, X, y, X_test, y_test, y_pred, accuracy_test, accuracy_train, le_dict, columns[:-1]
 
 # Load data and model
 try:
-    model, scaler, df, X_test, y_test, y_pred, accuracy, feature_columns, le_rumah, le_pekerjaan, le_pendidikan = load_and_prepare_data()
+    model, scaler, df, df_display, X, y, X_test, y_test, y_pred, accuracy_test, accuracy_train, le_dict, feature_names = load_and_prepare_data()
+    st.sidebar.success("✅ Model berhasil dimuat!")
 except Exception as e:
     st.error(f"Error loading data: {e}")
     st.stop()
@@ -120,15 +101,15 @@ except Exception as e:
 st.sidebar.title("💼 Menu Navigasi")
 menu = st.sidebar.selectbox(
     "Pilih Menu:",
-    ["🏠 Beranda", "ℹ️ Tentang", "📚 Pengenalan Aplikasi", "⚠️ Faktor Risiko", "🔬 Prediksi Angsuran"]
+    ["🏠 Beranda", "ℹ️ Tentang", "📚 Pengenalan Aplikasi", "⚠️ Faktor Risiko", "🔬 Prediksi Kredit"]
 )
 
 # Menu: Tentang
 if menu == "ℹ️ Tentang":
     st.title("ℹ️ Tentang Aplikasi")
     
-    st.markdown("""
-    ## Sistem Prediksi Kemampuan Bayar Angsuran
+    st.markdown(f"""
+    ## Sistem Prediksi Risiko Kredit
     
     ### Versi 1.0
     
@@ -143,34 +124,48 @@ if menu == "ℹ️ Tentang":
     - Pandas & NumPy (Pengolahan Data)
     
     ### Tentang Dataset
-    Dataset yang digunakan berisi data nasabah dengan berbagai parameter finansial dan demografis untuk memprediksi kemampuan membayar angsuran.
+    Dataset yang digunakan adalah **German Credit Data** dari UCI Machine Learning Repository, dataset standar industri untuk credit risk modeling.
     
-    **Jumlah Data:** 1000 sampel nasabah
+    **Sumber:** UCI Machine Learning Repository
     
-    **Jumlah Fitur:** 12 parameter finansial dan demografis
+    **Jumlah Data:** {len(df)} nasabah
     
-    **Target:** Prediksi bulan ke berapa nasabah akan menunggak (0 = tidak menunggak)
+    **Jumlah Fitur:** {len(feature_names)} parameter
+    
+    **Target:** Prediksi risiko kredit (Good/Bad)
+    
+    **Distribusi:**
+    - Good Credit (Lancar): {(df['target'] == 0).sum()} nasabah ({(df['target'] == 0).sum()/len(df)*100:.1f}%)
+    - Bad Credit (Default): {(df['target'] == 1).sum()} nasabah ({(df['target'] == 1).sum()/len(df)*100:.1f}%)
     
     ### Model Machine Learning
-    - **Algoritma:** Random Forest Classifier
-    - **Akurasi Model:** {:.2%}
-    - **Preprocessing:** Standardisasi & Label Encoding
-    - **Kategori Prediksi:** 
-      - Lancar (tidak menunggak)
-      - Risiko Tinggi (1-3 bulan)
-      - Risiko Sedang (4-6 bulan)
-      - Risiko Rendah (7-12 bulan)
+    - **Algoritma:** Random Forest Classifier (200 trees)
+    - **Akurasi Training:** {accuracy_train:.2%}
+    - **Akurasi Testing:** {accuracy_test:.2%}
+    - **Preprocessing:** Label Encoding + Standardisasi
+    - **Class Balancing:** Balanced class weights
+    
+    ### Fitur Dataset
+    Dataset mencakup informasi:
+    - Status rekening checking
+    - Durasi kredit (bulan)
+    - Riwayat kredit
+    - Tujuan kredit
+    - Jumlah kredit
+    - Status tabungan
+    - Status pekerjaan
+    - Tingkat cicilan
+    - Status personal & tanggungan
+    - Dan 11 fitur lainnya
     
     ### Disclaimer
-    ⚠️ **Penting:** Aplikasi ini hanya untuk tujuan **analisis risiko dan referensi internal**. Keputusan pemberian kredit harus mempertimbangkan berbagai faktor lain dan dilakukan oleh analis kredit yang berpengalaman.
-    
-    Hasil prediksi ini **TIDAK** dapat menjadi satu-satunya dasar keputusan kredit dan harus dikombinasikan dengan:
+    ⚠️ **Penting:** Aplikasi ini untuk tujuan **analisis risiko dan referensi internal**. Keputusan kredit harus mempertimbangkan:
     - Verifikasi dokumen lengkap
     - Wawancara langsung
-    - Site visit/survey lokasi
-    - Analisis mendalam kondisi bisnis/pekerjaan
-    - Pertimbangan aspek karakter dan komitmen nasabah
-    """.format(accuracy))
+    - Site visit
+    - Analisis mendalam
+    - Pertimbangan aspek karakter
+    """)
     
     st.markdown("---")
     st.info("💡 **Tip:** Gunakan menu sidebar untuk navigasi ke berbagai fitur aplikasi.")
@@ -180,491 +175,449 @@ elif menu == "📚 Pengenalan Aplikasi":
     st.title("📚 Pengenalan Aplikasi")
     
     st.markdown("""
-    ## Apa itu Sistem Prediksi Kemampuan Bayar Angsuran?
+    ## Apa itu Sistem Prediksi Risiko Kredit?
     
-    Sistem Prediksi Kemampuan Bayar Angsuran adalah aplikasi berbasis **Machine Learning** yang dirancang untuk membantu lembaga keuangan menganalisis risiko kredit dan memprediksi kemampuan nasabah dalam membayar angsuran.
+    Sistem Prediksi Risiko Kredit adalah aplikasi berbasis **Machine Learning** yang dirancang untuk membantu lembaga keuangan menganalisis risiko kredit menggunakan German Credit Data - dataset standar industri dari UCI.
     
     ### 🎯 Tujuan Aplikasi
     
-    1. **Manajemen Risiko:** Membantu mengidentifikasi nasabah berisiko tinggi
-    2. **Efisiensi Proses:** Mempercepat proses analisis kredit
-    3. **Data-Driven Decision:** Keputusan berbasis data dan analisis objektif
-    4. **Early Warning System:** Deteksi dini potensi kredit bermasalah
-    5. **Optimalisasi Portfolio:** Meningkatkan kualitas portfolio kredit
+    1. **Manajemen Risiko:** Mengidentifikasi nasabah berisiko tinggi
+    2. **Efisiensi Proses:** Mempercepat analisis kredit
+    3. **Data-Driven Decision:** Keputusan berbasis data objektif
+    4. **Early Warning System:** Deteksi dini potensi default
+    5. **Benchmark Industry:** Menggunakan dataset standar UCI
     
     ### 🔬 Cara Kerja Aplikasi
     
-    1. **Input Data:** Input 12 parameter finansial dan demografis nasabah
-    2. **Preprocessing:** Data dinormalisasi dan di-encode
-    3. **Analisis ML:** Model Random Forest menganalisis pola risiko
-    4. **Prediksi:** Sistem memprediksi bulan ke berapa nasabah akan menunggak
-    5. **Klasifikasi Risiko:** Nasabah dikategorikan berdasarkan tingkat risiko
-    6. **Rekomendasi:** Sistem memberikan rekomendasi tindakan
+    1. **Input Data:** Masukkan 20 parameter nasabah
+    2. **Preprocessing:** Data di-encode dan dinormalisasi
+    3. **Analisis ML:** Random Forest menganalisis pola risiko
+    4. **Prediksi:** Klasifikasi Good/Bad credit risk
+    5. **Probabilitas:** Tingkat kepercayaan prediksi
+    6. **Rekomendasi:** Saran tindakan berdasarkan hasil
     
     ### 📊 Parameter yang Dianalisis
     
-    Aplikasi menganalisis **12 parameter** yang meliputi:
+    **20 Parameter** meliputi:
     
     **Data Finansial:**
-    - Pendapatan bulanan
-    - Total pinjaman
-    - Angsuran bulanan
-    - Debt-to-Income Ratio (DTI)
-    - Riwayat kredit score
-    - Jumlah pinjaman aktif
+    - Status rekening checking
+    - Durasi kredit (bulan)
+    - Jumlah kredit (DM)
+    - Tingkat cicilan
+    - Status tabungan
+    - Kredit yang sudah ada
     
-    **Data Demografis:**
+    **Data Demografis & Employment:**
     - Usia
-    - Jumlah tanggungan
-    - Lama bekerja
     - Status pekerjaan
-    - Kepemilikan rumah
-    - Tingkat pendidikan
+    - Lama bekerja
+    - Jumlah tanggungan
+    - Status kepemilikan rumah
+    - Telephone (landline)
+    
+    **Data Kredit History:**
+    - Riwayat kredit
+    - Tujuan kredit
+    - Other debtors/guarantors
+    - Other installment plans
+    - Property ownership
     
     ### 📈 Kategori Risiko
     
     | Kategori | Prediksi | Tindakan |
     |----------|----------|----------|
-    | **🟢 Lancar** | Tidak menunggak | Disetujui dengan rate normal |
-    | **🟡 Risiko Rendah** | Menunggak di bulan 7-12 | Disetujui dengan monitoring |
-    | **🟠 Risiko Sedang** | Menunggak di bulan 4-6 | Perlu analisis tambahan |
-    | **🔴 Risiko Tinggi** | Menunggak di bulan 1-3 | Ditolak atau persyaratan ketat |
+    | **🟢 Good Credit** | Tidak akan default | Disetujui dengan rate normal |
+    | **🔴 Bad Credit** | Berpotensi default | Ditolak atau persyaratan ketat |
     
-    ### ✨ Fitur Utama
+    ### ✨ Keunggulan Aplikasi
     
-    - 🎨 **Interface User-Friendly:** Dashboard intuitif dan mudah digunakan
-    - 📊 **Visualisasi Interaktif:** Grafik dan chart yang informatif
-    - 🔍 **Analisis Real-time:** Hasil prediksi instant
-    - 📈 **Dashboard Analytics:** Statistik dan performa model
-    - 💾 **Berbasis Web:** Akses dari browser, multi-platform
-    - 🔐 **Secure:** Data terenkripsi dan aman
+    - ✅ **Dataset Real:** German Credit Data (standar industri)
+    - ✅ **Akurasi Tinggi:** Model dengan performa optimal
+    - ✅ **Random Forest:** Ensemble learning untuk akurasi lebih baik
+    - ✅ **Balanced:** Handle imbalanced data
+    - ✅ **Interpretable:** Feature importance analysis
+    - ✅ **User-Friendly:** Interface intuitif
     
     ### 🚀 Cara Menggunakan
     
-    1. Pilih menu **"🔬 Prediksi Angsuran"** di sidebar
-    2. Masukkan semua data finansial dan demografis nasabah
-    3. Klik tombol **"🔍 Analisis Risiko"**
-    4. Lihat hasil prediksi, kategori risiko, dan rekomendasi
-    5. Download laporan hasil analisis (opsional)
+    1. Pilih menu **"🔬 Prediksi Kredit"**
+    2. Input semua parameter nasabah di sidebar
+    3. Klik **"🔍 Analisis Risiko"**
+    4. Review hasil prediksi dan probabilitas
+    5. Ikuti rekomendasi yang diberikan
     
     ### 💡 Best Practices
     
-    - ✅ Pastikan semua data akurat dan terverifikasi
-    - ✅ Gunakan data terbaru (maksimal 30 hari)
-    - ✅ Lakukan cross-check dengan dokumen pendukung
+    - ✅ Pastikan data akurat dan terverifikasi
+    - ✅ Gunakan data terbaru (< 30 hari)
+    - ✅ Cross-check dengan dokumen
     - ✅ Kombinasikan dengan analisis kualitatif
-    - ✅ Update data secara berkala untuk monitoring
+    - ✅ Update berkala untuk monitoring
     """)
     
-    st.success("✅ Siap menggunakan aplikasi? Pilih menu **'🔬 Prediksi Angsuran'** untuk mulai!")
+    st.success("✅ Siap menggunakan aplikasi? Pilih menu **'🔬 Prediksi Kredit'** untuk mulai!")
 
 # Menu: Faktor Risiko
 elif menu == "⚠️ Faktor Risiko":
-    st.title("⚠️ Faktor Risiko Kredit Macet")
+    st.title("⚠️ Faktor Risiko Kredit")
     
     st.markdown("""
-    ## Memahami Faktor Risiko dalam Pembayaran Angsuran
+    ## Memahami Faktor Risiko dalam German Credit Data
     
-    Kredit macet atau tunggakan pembayaran adalah masalah serius dalam industri keuangan. Memahami faktor risikonya adalah kunci untuk manajemen risiko yang efektif.
+    Dataset ini menganalisis 20 faktor yang mempengaruhi risiko kredit berdasarkan data historis dari Jerman.
     """)
     
-    # Faktor Risiko Finansial
-    st.subheader("💰 Faktor Risiko Finansial")
+    # Feature Importance
+    st.subheader("📊 Tingkat Kepentingan Fitur")
+    
+    feature_importance = pd.DataFrame({
+        'Feature': feature_names,
+        'Importance': model.feature_importances_
+    }).sort_values('Importance', ascending=False)
+    
+    fig_importance = px.bar(
+        feature_importance.head(10),
+        x='Importance',
+        y='Feature',
+        orientation='h',
+        title='Top 10 Fitur Paling Penting',
+        color='Importance',
+        color_continuous_scale='Viridis'
+    )
+    fig_importance.update_layout(yaxis={'categoryorder':'total ascending'})
+    st.plotly_chart(fig_importance, use_container_width=True)
+    
+    st.markdown("---")
+    
+    # Faktor Risiko Detail
+    st.subheader("💰 Faktor Risiko Utama")
     
     col1, col2 = st.columns(2)
     
     with col1:
         st.markdown("""
-        ### 1. 📊 Debt-to-Income Ratio (DTI)
-        **Rasio paling penting dalam analisis kredit**
+        ### 1. 🏦 Status Rekening Checking
+        **Indikator paling penting**
         
-        - **Definisi:** Persentase pendapatan yang digunakan untuk membayar utang
-        - **Formula:** (Total Angsuran / Pendapatan) × 100%
-        - **Kategori:**
-          - DTI < 30%: **Sangat Baik** ✅
-          - DTI 30-40%: **Baik** 🟢
-          - DTI 40-50%: **Perhatian** 🟡
-          - DTI > 50%: **Risiko Tinggi** 🔴
+        - **< 0 DM:** Overdraft - Risiko SANGAT TINGGI 🔴
+        - **0-200 DM:** Saldo minimal - Risiko Tinggi 🟠
+        - **>= 200 DM:** Saldo baik - Risiko Rendah 🟢
+        - **Tidak Ada:** No checking account - Perhatian 🟡
         
         **Mengapa Penting:**
-        - Mengukur kemampuan bayar riil
-        - Indikator stress finansial
-        - Prediktor kuat kredit macet
+        - Menunjukkan cash flow management
+        - Indikator financial discipline
+        - Prediktor kuat kemampuan bayar
         
-        ### 2. 💳 Riwayat Kredit Score
-        **Credit score: 300-850**
+        ### 2. ⏱️ Durasi Kredit
+        **Tenor kredit dalam bulan**
         
-        - **800-850:** Excellent (Risiko sangat rendah)
-        - **740-799:** Very Good (Risiko rendah)
-        - **670-739:** Good (Risiko sedang)
-        - **580-669:** Fair (Risiko tinggi)
-        - **< 580:** Poor (Risiko sangat tinggi)
-        
-        **Dampak:**
-        - Score rendah = 3-5x lebih mungkin macet
-        - Mencerminkan track record pembayaran
-        - Faktor kunci dalam approval
-        
-        ### 3. 💰 Pendapatan Bulanan
-        **Stabilitas dan kecukupan income**
-        
-        - **Minimum:** 3x angsuran bulanan
-        - **Ideal:** 5x angsuran bulanan
-        - **Verifikasi:** Slip gaji, rekening koran
+        - **< 12 bulan:** Risiko rendah (short-term)
+        - **12-24 bulan:** Risiko sedang
+        - **24-36 bulan:** Risiko tinggi
+        - **> 36 bulan:** Risiko sangat tinggi
         
         **Pertimbangan:**
-        - Sumber pendapatan (tetap vs. variabel)
-        - Tren pendapatan (naik/stabil/turun)
-        - Pendapatan tambahan (side income)
-        """)
-    
-    with col2:
-        st.markdown("""
-        ### 4. 📈 Jumlah Pinjaman Aktif
-        **Multiple loans = higher risk**
+        - Semakin lama, semakin banyak uncertainty
+        - Life events bisa terjadi
+        - Economic cycles berubah
         
-        - **0-1 pinjaman:** Risiko rendah
-        - **2-3 pinjaman:** Risiko sedang
-        - **4+ pinjaman:** Risiko tinggi
+        ### 3. 📜 Riwayat Kredit
+        **Track record pembayaran**
         
-        **Bahaya Multiple Loans:**
-        - Beban angsuran berlipat
-        - Stress finansial tinggi
-        - Juggling payments
-        - Domino effect jika satu macet
+        - **Critical Account:** Risiko SANGAT TINGGI 🔴
+        - **Delay in Past:** Risiko Tinggi 🟠
+        - **Paid Duly:** Risiko Rendah 🟢
+        - **No Credits:** New customer - perlu hati-hati
         
-        ### 5. 🏦 Total Pinjaman
-        **Besaran exposure**
+        ### 4. 💵 Jumlah Kredit
+        **Credit amount dalam Deutsche Mark**
         
-        - **< 5x gaji:** Reasonable
-        - **5-10x gaji:** Perhatian
-        - **> 10x gaji:** Sangat berisiko
+        - **< 2,500 DM:** Low risk
+        - **2,500-5,000 DM:** Medium risk
+        - **5,000-10,000 DM:** High risk
+        - **> 10,000 DM:** Very high risk
         
         **Risiko:**
-        - Semakin besar, semakin lama tenor
-        - Life events bisa ganggu pembayaran
+        - Exposure lebih besar
         - Recovery lebih sulit
-        
-        ### 6. 💸 Angsuran Bulanan
-        **Monthly burden**
-        
-        - **< Rp 2 juta:** Low risk
-        - **Rp 2-5 juta:** Medium risk
-        - **> Rp 5 juta:** High risk
-        
-        **Pertimbangan:**
-        - Proporsi terhadap income
-        - Fluktuasi pengeluaran bulanan
-        - Emergency fund availability
-        """)
-    
-    st.markdown("---")
-    
-    # Faktor Risiko Demografis
-    st.subheader("👥 Faktor Risiko Demografis")
-    
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        st.markdown("""
-        ### 1. 🎂 Usia
-        **Age-risk correlation**
-        
-        - **21-25 tahun:** Risiko tinggi
-          - Pendapatan tidak stabil
-          - Kurang pengalaman keuangan
-        - **26-45 tahun:** Risiko rendah-sedang
-          - Peak earning years
-          - Lebih stabil
-        - **46-60 tahun:** Risiko sedang
-          - Stabilitas tinggi tapi...
-          - Mendekati pensiun
-        - **> 60 tahun:** Risiko tinggi
-          - Pendapatan menurun
-          - Health issues
-        
-        ### 2. 👨‍👩‍👧‍👦 Jumlah Tanggungan
-        **More dependents = higher expenses**
-        
-        - **0-1:** Risiko rendah
-        - **2-3:** Risiko sedang
-        - **4+:** Risiko tinggi
-        
-        **Dampak:**
-        - Biaya hidup meningkat
-        - Emergency needs lebih sering
-        - Saving capacity berkurang
-        
-        ### 3. 💼 Lama Bekerja
-        **Job stability indicator**
-        
-        - **< 1 tahun:** Risiko tinggi
-        - **1-3 tahun:** Risiko sedang
-        - **3-5 tahun:** Risiko rendah
-        - **> 5 tahun:** Sangat stabil
-        
-        **Pentingnya:**
-        - Stabilitas income
-        - Job security
-        - Career progression
+        - Impact lebih besar jika default
         """)
     
     with col2:
         st.markdown("""
-        ### 4. 🏢 Status Pekerjaan
-        **Employment type matters**
+        ### 5. 💰 Status Tabungan
+        **Savings account/bonds**
         
-        - **Pegawai Tetap:**
-          - Risiko paling rendah
-          - Income predictable
-          - Job security tinggi
+        - **< 100 DM:** Risiko Tinggi 🔴
+        - **100-500 DM:** Risiko Sedang 🟠
+        - **500-1000 DM:** Risiko Rendah 🟢
+        - **>= 1000 DM:** Sangat Baik ✅
         
-        - **Pegawai Kontrak:**
-          - Risiko sedang
-          - Uncertainty di akhir kontrak
-          - Perlu renewal guarantee
+        **Emergency Buffer:**
+        - Tabungan = safety net
+        - Bisa cover unexpected expenses
+        - Mengurangi risiko default
         
-        - **Wiraswasta:**
-          - Risiko tinggi
-          - Income fluktuatif
-          - Business risk exposure
-          - Perlu business track record
+        ### 6. 💼 Status Pekerjaan
+        **Employment duration**
         
-        ### 5. 🏠 Kepemilikan Rumah
-        **Asset & stability indicator**
+        - **Unemployed:** Risiko SANGAT TINGGI 🔴
+        - **< 1 year:** Risiko Tinggi 🟠
+        - **1-4 years:** Risiko Sedang 🟡
+        - **4-7 years:** Risiko Rendah 🟢
+        - **>= 7 years:** Sangat Stabil ✅
         
-        - **Milik Sendiri:** Risiko rendah
-          - Ada aset sebagai backup
-          - Stabilitas tinggi
+        ### 7. 📊 Tingkat Cicilan
+        **Installment rate (% of disposable income)**
         
-        - **Keluarga:** Risiko sedang
-          - Support system ada
-          - Tapi no asset
+        - **1%:** Sangat ringan
+        - **2%:** Ringan
+        - **3%:** Sedang
+        - **4%+:** Berat - Risiko tinggi
         
-        - **Sewa:** Risiko tinggi
-          - Extra monthly burden
-          - No asset
-          - Mobility tinggi
+        ### 8. 🎂 Usia
+        **Age in years**
         
-        ### 6. 🎓 Tingkat Pendidikan
-        **Education correlates with income**
+        - **< 25:** Risiko Tinggi (belum stabil)
+        - **25-45:** Risiko Rendah (peak earning)
+        - **45-60:** Risiko Sedang (stabil tapi...)
+        - **> 60:** Risiko Tinggi (mendekati pensiun)
         
-        - **S2/S3:** Risiko paling rendah
-        - **S1:** Risiko rendah
-        - **D3:** Risiko sedang
-        - **SMA:** Risiko tinggi
+        ### 9. 🏠 Property Ownership
+        **Jenis aset yang dimiliki**
         
-        **Alasan:**
-        - Earning potential berbeda
-        - Career options lebih luas
-        - Financial literacy
+        - **Real Estate:** Risiko RENDAH ✅
+        - **Building Society/Life Insurance:** Sedang
+        - **Car/Other:** Tinggi
+        - **No Property:** Sangat Tinggi 🔴
+        
+        ### 10. 👨‍👩‍👧 Jumlah Tanggungan
+        **Number of dependents**
+        
+        - **0-1:** Risiko rendah
+        - **2:** Risiko sedang
+        - **3+:** Risiko tinggi (beban besar)
         """)
     
     st.markdown("---")
     
-    # Red Flags
-    st.subheader("🚨 Red Flags - Tanda Bahaya")
+    # Statistics from actual data
+    st.subheader("📈 Statistik Dataset")
     
     col1, col2, col3 = st.columns(3)
     
     with col1:
-        st.error("""
-        ### 🔴 Financial Red Flags
-        - DTI > 50%
-        - Credit score < 580
-        - 4+ pinjaman aktif
-        - Riwayat tunggakan
-        - Pendapatan tidak stabil
-        - No emergency fund
-        - Sering ganti pekerjaan
-        """)
+        st.metric("Rata-rata Durasi", f"{df['duration'].mean():.1f} bulan")
+        st.metric("Rata-rata Jumlah Kredit", f"{df['credit_amount'].mean():.0f} DM")
     
     with col2:
-        st.warning("""
-        ### 🟡 Behavioral Red Flags
-        - Sering telat bayar tagihan
-        - Aplikasi kredit ditolak berulang
-        - Maksimal limit kartu kredit
-        - Cash advance rutin
-        - Pinjaman ke banyak tempat
-        - Tidak kooperatif saat verifikasi
-        """)
+        st.metric("Rata-rata Usia", f"{df['age'].mean():.1f} tahun")
+        st.metric("Median Installment Rate", f"{df['installment_rate'].median():.0f}%")
     
     with col3:
-        st.info("""
-        ### 🟢 Positive Indicators
-        - DTI < 30%
-        - Credit score > 740
-        - Track record baik
-        - Pekerjaan stabil > 3 tahun
-        - Aset memadai
-        - Emergency fund 6+ bulan
-        - Single loan or maksimal 2
-        """)
+        good_rate = (df['target'] == 0).sum() / len(df) * 100
+        st.metric("Good Credit Rate", f"{good_rate:.1f}%")
+        st.metric("Bad Credit Rate", f"{100-good_rate:.1f}%")
     
     st.markdown("---")
     
-    # Mitigation Strategies
-    st.subheader("🛡️ Strategi Mitigasi Risiko")
+    st.info("""
+    ### 💡 Tips Pencegahan Default
     
-    st.markdown("""
-    ### Untuk Lembaga Keuangan:
+    **Untuk Lembaga Keuangan:**
+    1. ✅ Fokus pada checking account status - prediktor #1
+    2. ✅ Limit durasi kredit maksimal 24 bulan untuk high-risk
+    3. ✅ Require higher down payment untuk no savings
+    4. ✅ Cross-check employment stability
+    5. ✅ Prioritize applicants dengan property ownership
     
-    1. **Verifikasi Ketat**
-       - Cross-check semua dokumen
-       - Site visit untuk wiraswasta
-       - Contact employer/business partner
-    
-    2. **Collateral & Guarantor**
-       - Minta jaminan untuk high-risk applicant
-       - Personal guarantor dengan kapasitas
-       - Insurance coverage
-    
-    3. **Graduated Limit**
-       - Mulai dengan limit kecil
-       - Increase based on payment behavior
-       - Test period 6-12 bulan
-    
-    4. **Dynamic Pricing**
-       - Interest rate sesuai risk profile
-       - High risk = higher rate
-       - Incentive untuk low risk customers
-    
-    5. **Early Warning System**
-       - Monitor payment patterns
-       - Flag slight delays
-       - Proactive contact
-    
-    6. **Collection Strategy**
-       - Segmentasi debitur by risk
-       - Automated reminders
-       - Escalation protocol
-    
-    ### Untuk Nasabah (Tips Agar Tidak Menunggak):
-    
-    ✅ **Jaga DTI di bawah 30%** - Jangan overcommit
-    
-    ✅ **Build Emergency Fund** - Minimal 6 bulan pengeluaran
-    
-    ✅ **Otomatis Payment** - Set auto-debit agar tidak lupa
-    
-    ✅ **Prioritaskan Pembayaran** - Angsuran lebih penting dari lifestyle
-    
-    ✅ **Komunikasi Proaktif** - Hubungi bank jika ada masalah
-    
-    ✅ **Avoid Multiple Loans** - Jangan ambil pinjaman baru sebelum selesai
-    
-    ✅ **Track Spending** - Monitor cash flow bulanan
-    
-    ✅ **Increase Income** - Cari side hustle jika perlu
+    **Untuk Nasabah:**
+    1. ✅ Maintain positive checking account balance
+    2. ✅ Build savings (minimal 6 bulan expenses)
+    3. ✅ Establish good credit history
+    4. ✅ Keep employment stable (minimum 1 tahun)
+    5. ✅ Apply for reasonable loan amount
+    6. ✅ Avoid high installment rates (< 3% ideal)
     """)
 
-# Menu: Prediksi Angsuran
-elif menu == "🔬 Prediksi Angsuran":
-    st.title("🔬 Sistem Prediksi Kemampuan Bayar Angsuran")
+# Menu: Prediksi Kredit
+elif menu == "🔬 Prediksi Kredit":
+    st.title("🔬 Sistem Prediksi Risiko Kredit")
     st.markdown("""
-    Masukkan data finansial dan demografis nasabah di sidebar untuk mendapatkan prediksi risiko kredit.
+    Masukkan data nasabah berdasarkan German Credit Data format untuk analisis risiko kredit.
     """)
     
-    # Sidebar for user input
+    # Sidebar inputs
     st.sidebar.header("📋 Data Nasabah")
-    st.sidebar.markdown("**Data Finansial**")
+    st.sidebar.markdown("**Informasi Finansial**")
     
-    # Financial data inputs
-    pendapatan_bulanan = st.sidebar.number_input(
-        "Pendapatan Bulanan (Rp)", 
-        min_value=1000000, 
-        max_value=100000000, 
-        value=5000000,
-        step=500000
+    status_checking = st.sidebar.selectbox(
+        "Status Rekening Checking",
+        options=['A11', 'A12', 'A13', 'A14'],
+        format_func=lambda x: {'A11': '< 0 DM (Overdraft)', 'A12': '0-200 DM', 
+                               'A13': '>= 200 DM', 'A14': 'Tidak Ada'}[x]
     )
     
-    total_pinjaman = st.sidebar.number_input(
-        "Total Pinjaman (Rp)", 
-        min_value=1000000, 
-        max_value=500000000, 
-        value=50000000,
-        step=5000000
+    duration = st.sidebar.slider("Durasi Kredit (bulan)", 6, 72, 24)
+    
+    credit_amount = st.sidebar.number_input(
+        "Jumlah Kredit (DM)",
+        min_value=250,
+        max_value=20000,
+        value=3000,
+        step=250
     )
     
-    angsuran_bulanan = st.sidebar.number_input(
-        "Angsuran Bulanan (Rp)", 
-        min_value=100000, 
-        max_value=20000000, 
-        value=2000000,
-        step=100000
+    credit_history = st.sidebar.selectbox(
+        "Riwayat Kredit",
+        options=['A30', 'A31', 'A32', 'A33', 'A34'],
+        format_func=lambda x: {
+            'A30': 'No credits / All paid',
+            'A31': 'All paid at this bank',
+            'A32': 'Existing paid duly',
+            'A33': 'Delay in past',
+            'A34': 'Critical account'
+        }[x]
     )
     
-    riwayat_kredit_score = st.sidebar.slider(
-        "Riwayat Kredit Score", 
-        300, 850, 650
+    purpose = st.sidebar.selectbox(
+        "Tujuan Kredit",
+        options=['A40', 'A41', 'A42', 'A43', 'A44', 'A45', 'A46', 'A48', 'A49', 'A410'],
+        format_func=lambda x: {
+            'A40': 'Mobil Baru', 'A41': 'Mobil Bekas', 'A42': 'Furniture',
+            'A43': 'Radio/TV', 'A44': 'Alat Rumah Tangga', 'A45': 'Perbaikan',
+            'A46': 'Pendidikan', 'A48': 'Retraining', 'A49': 'Bisnis', 'A410': 'Lainnya'
+        }[x]
     )
     
-    jumlah_pinjaman_aktif = st.sidebar.selectbox(
-        "Jumlah Pinjaman Aktif", 
-        options=[0, 1, 2, 3, 4, 5]
+    savings = st.sidebar.selectbox(
+        "Status Tabungan",
+        options=['A61', 'A62', 'A63', 'A64', 'A65'],
+        format_func=lambda x: {
+            'A61': '< 100 DM', 'A62': '100-500 DM',
+            'A63': '500-1000 DM', 'A64': '>= 1000 DM', 'A65': 'Unknown/None'
+        }[x]
     )
+    
+    employment = st.sidebar.selectbox(
+        "Status Pekerjaan",
+        options=['A71', 'A72', 'A73', 'A74', 'A75'],
+        format_func=lambda x: {
+            'A71': 'Unemployed', 'A72': '< 1 year',
+            'A73': '1-4 years', 'A74': '4-7 years', 'A75': '>= 7 years'
+        }[x]
+    )
+    
+    installment_rate = st.sidebar.slider("Tingkat Cicilan (% pendapatan)", 1, 4, 2)
     
     st.sidebar.markdown("---")
-    st.sidebar.markdown("**Data Demografis**")
+    st.sidebar.markdown("**Informasi Personal**")
     
-    # Demographic data inputs
-    usia = st.sidebar.slider("Usia", 21, 65, 35)
+    age = st.sidebar.slider("Usia (tahun)", 19, 75, 35)
     
-    jumlah_tanggungan = st.sidebar.selectbox(
-        "Jumlah Tanggungan", 
-        options=[0, 1, 2, 3, 4, 5]
+    personal_status = st.sidebar.selectbox(
+        "Status Personal",
+        options=['A91', 'A92', 'A93', 'A94', 'A95'],
+        format_func=lambda x: {
+            'A91': 'Male : divorced/separated',
+            'A92': 'Female : divorced/separated/married',
+            'A93': 'Male : single',
+            'A94': 'Male : married/widowed',
+            'A95': 'Female : single'
+        }[x]
     )
     
-    lama_bekerja_tahun = st.sidebar.slider(
-        "Lama Bekerja (Tahun)", 
-        0, 30, 5
+    num_dependents = st.sidebar.selectbox("Jumlah Tanggungan", [1, 2])
+    
+    residence_since = st.sidebar.slider("Lama Tinggal (tahun)", 1, 4, 2)
+    
+    property = st.sidebar.selectbox(
+        "Property",
+        options=['A121', 'A122', 'A123', 'A124'],
+        format_func=lambda x: {
+            'A121': 'Real estate',
+            'A122': 'Building society savings/Life insurance',
+            'A123': 'Car or other',
+            'A124': 'Unknown / No property'
+        }[x]
     )
     
-    status_pekerjaan = st.sidebar.selectbox(
-        "Status Pekerjaan", 
-        options=['Tetap', 'Kontrak', 'Wiraswasta']
+    other_debtors = st.sidebar.selectbox(
+        "Other Debtors/Guarantors",
+        options=['A101', 'A102', 'A103'],
+        format_func=lambda x: {
+            'A101': 'None',
+            'A102': 'Co-applicant',
+            'A103': 'Guarantor'
+        }[x]
     )
     
-    kepemilikan_rumah = st.sidebar.selectbox(
-        "Kepemilikan Rumah", 
-        options=['Milik Sendiri', 'Sewa', 'Keluarga']
+    other_installments = st.sidebar.selectbox(
+        "Other Installment Plans",
+        options=['A141', 'A142', 'A143'],
+        format_func=lambda x: {
+            'A141': 'Bank',
+            'A142': 'Stores',
+            'A143': 'None'
+        }[x]
     )
     
-    pendidikan = st.sidebar.selectbox(
-        "Pendidikan Terakhir", 
-        options=['SMA', 'D3', 'S1', 'S2']
+    housing = st.sidebar.selectbox(
+        "Housing",
+        options=['A151', 'A152', 'A153'],
+        format_func=lambda x: {
+            'A151': 'Rent',
+            'A152': 'Own',
+            'A153': 'For free'
+        }[x]
     )
     
-    # Calculate DTI
-    debt_to_income_ratio = (angsuran_bulanan / pendapatan_bulanan) * 100
+    existing_credits = st.sidebar.selectbox("Jumlah Kredit di Bank Ini", [1, 2, 3, 4])
     
-    # Create prediction button
+    job = st.sidebar.selectbox(
+        "Tipe Pekerjaan",
+        options=['A171', 'A172', 'A173', 'A174'],
+        format_func=lambda x: {
+            'A171': 'Unemployed/unskilled - non-resident',
+            'A172': 'Unskilled - resident',
+            'A173': 'Skilled employee / official',
+            'A174': 'Management / self-employed'
+        }[x]
+    )
+    
+    telephone = st.sidebar.selectbox(
+        "Telepon",
+        options=['A191', 'A192'],
+        format_func=lambda x: {'A191': 'None', 'A192': 'Yes'}[x]
+    )
+    
+    foreign_worker = st.sidebar.selectbox(
+        "Pekerja Asing",
+        options=['A201', 'A202'],
+        format_func=lambda x: {'A201': 'Yes', 'A202': 'No'}[x]
+    )
+    
     predict_button = st.sidebar.button("🔍 Analisis Risiko", use_container_width=True)
     
-    # Main content area
+    # Main content
     col1, col2 = st.columns([2, 1])
     
     with col1:
         st.subheader("📊 Performa Model")
         
-        # Display metrics
         col_m1, col_m2, col_m3 = st.columns(3)
-        col_m1.metric("Akurasi Model", f"{accuracy:.1%}")
-        col_m2.metric("Total Nasabah", len(df))
-        col_m3.metric("Jumlah Fitur", 12)
+        col_m1.metric("Akurasi Testing", f"{accuracy_test:.1%}")
+        col_m2.metric("Akurasi Training", f"{accuracy_train:.1%}")
+        col_m3.metric("Total Data", len(df))
         
         # Confusion Matrix
         cm = confusion_matrix(y_test, y_pred)
-        
-        # Buat label untuk confusion matrix
-        unique_classes = sorted(np.unique(np.concatenate([y_test, y_pred])))
-        labels = [f"Bulan {int(x)}" if x > 0 else "Lancar" for x in unique_classes]
-        
-        fig_cm = px.imshow(cm, 
+        fig_cm = px.imshow(cm,
                            labels=dict(x="Prediksi", y="Aktual", color="Jumlah"),
-                           x=labels,
-                           y=labels,
+                           x=['Good Credit', 'Bad Credit'],
+                           y=['Good Credit', 'Bad Credit'],
                            text_auto=True,
                            color_continuous_scale='RdYlGn_r')
         fig_cm.update_layout(title="Confusion Matrix")
@@ -673,477 +626,43 @@ elif menu == "🔬 Prediksi Angsuran":
     with col2:
         st.subheader("📈 Distribusi Risiko")
         
-        # Risk distribution
-        risk_counts = df['kategori_risiko'].value_counts()
-        colors_map = {
-            'Lancar': '#2ecc71',
-            'Risiko Rendah (7-12 bulan)': '#f39c12',
-            'Risiko Sedang (4-6 bulan)': '#e67e22',
-            'Risiko Tinggi (1-3 bulan)': '#e74c3c'
-        }
-        colors = [colors_map.get(label, '#95a5a6') for label in risk_counts.index]
-        
+        risk_counts = df['target'].value_counts()
         fig_dist = go.Figure(data=[go.Pie(
-            labels=risk_counts.index,
-            values=risk_counts.values,
+            labels=['Good Credit', 'Bad Credit'],
+            values=[risk_counts[0], risk_counts[1]],
             hole=0.4,
-            marker=dict(colors=colors)
+            marker=dict(colors=['#2ecc71', '#e74c3c'])
         )])
-        fig_dist.update_layout(title="Kategori Risiko Nasabah")
+        fig_dist.update_layout(title="Target Distribution")
         st.plotly_chart(fig_dist, use_container_width=True)
         
-        # Statistics
-        st.markdown("### 📊 Statistik Dataset")
-        st.metric("Rata-rata DTI", f"{df['debt_to_income_ratio'].mean():.1f}%")
-        st.metric("Rata-rata Credit Score", f"{df['riwayat_kredit_score'].mean():.0f}")
+        st.metric("Good Rate", f"{risk_counts[0]/len(df)*100:.1f}%")
+        st.metric("Bad Rate", f"{risk_counts[1]/len(df)*100:.1f}%")
     
-    # Prediction section
+    # Prediction
     if predict_button:
         st.markdown("---")
         st.subheader("🎯 Hasil Analisis Risiko")
         
-        # Encode categorical variables
-        kepemilikan_encoded = le_rumah.transform([kepemilikan_rumah])[0]
-        pekerjaan_encoded = le_pekerjaan.transform([status_pekerjaan])[0]
-        pendidikan_encoded = le_pendidikan.transform([pendidikan])[0]
-        
-        # Prepare input features
-        input_data = np.array([[
-            pendapatan_bulanan, usia, jumlah_tanggungan, lama_bekerja_tahun,
-            total_pinjaman, angsuran_bulanan, riwayat_kredit_score,
-            jumlah_pinjaman_aktif, debt_to_income_ratio,
-            kepemilikan_encoded, pekerjaan_encoded, pendidikan_encoded
-        ]])
-        
-        # Scale input
-        input_scaled = scaler.transform(input_data)
-        
-        # Make prediction
-        prediction = model.predict(input_scaled)[0]
-        prediction_proba = model.predict_proba(input_scaled)[0]
-        
-        # Determine risk category
-        if prediction == 0:
-            kategori = "🟢 Lancar (Tidak Menunggak)"
-            warna = "success"
-            rekomendasi = """
-            ### ✅ Rekomendasi: DISETUJUI
-            
-            **Tindakan:**
-            - ✅ Kredit dapat disetujui dengan rate normal
-            - ✅ Limit sesuai kapasitas maksimal
-            - ✅ Tenor fleksibel sesuai kebutuhan
-            - ✅ Monitoring rutin standar (bulanan)
-            
-            **Alasan:**
-            - Profil finansial sehat
-            - DTI dalam batas aman
-            - Track record baik
-            - Risiko kredit macet sangat rendah
-            
-            **Tips untuk Nasabah:**
-            - Pertahankan disiplin pembayaran
-            - Jaga credit score tetap baik
-            - Hindari mengambil pinjaman baru
-            - Build emergency fund
-            """
-        elif prediction <= 3:
-            kategori = f"🔴 Risiko Tinggi (Prediksi Menunggak Bulan ke-{int(prediction)})"
-            warna = "error"
-            rekomendasi = """
-            ### ⛔ Rekomendasi: DITOLAK / PERSYARATAN KETAT
-            
-            **Tindakan:**
-            - ⚠️ Sebaiknya kredit ditolak
-            - ⚠️ Jika tetap disetujui: limit minimal, tenor pendek
-            - ⚠️ Wajib ada jaminan/collateral kuat
-            - ⚠️ Perlu guarantor dengan kapasitas baik
-            - ⚠️ Interest rate lebih tinggi (risk-based pricing)
-            - ⚠️ Monitoring ketat (mingguan)
-            
-            **Alasan:**
-            - Risiko kredit macet sangat tinggi
-            - Prediksi menunggak dalam 1-3 bulan pertama
-            - Profil finansial tidak memadai
-            - DTI kemungkinan terlalu tinggi
-            
-            **Saran untuk Perbaikan:**
-            - Turunkan DTI di bawah 30%
-            - Tingkatkan pendapatan
-            - Lunasi pinjaman yang ada
-            - Perbaiki credit score
-            - Tunggu 6-12 bulan untuk re-apply
-            """
-        elif prediction <= 6:
-            kategori = f"🟠 Risiko Sedang (Prediksi Menunggak Bulan ke-{int(prediction)})"
-            warna = "warning"
-            rekomendasi = """
-            ### ⚠️ Rekomendasi: PERLU ANALISIS TAMBAHAN
-            
-            **Tindakan:**
-            - 🔍 Lakukan verifikasi mendalam
-            - 🔍 Site visit/survey wajib dilakukan
-            - 🔍 Interview langsung dengan nasabah
-            - 🔍 Check reference (employer/business)
-            - 🔍 Limit moderat (50-70% dari maksimal)
-            - 🔍 Tenor diperpendek
-            - 🔍 Monitoring intensif (2 minggu sekali)
-            
-            **Pertimbangan:**
-            - Ada indikasi risiko medium
-            - Perlu mitigasi tambahan
-            - Collateral sangat direkomendasikan
-            - Grace period lebih ketat
-            
-            **Mitigasi Risiko:**
-            - Minta proof of income terbaru
-            - Cek stability pekerjaan/bisnis
-            - Graduated limit (mulai kecil)
-            - Asuransi kredit wajib
-            - Early warning system
-            """
-        else:
-            kategori = f"🟡 Risiko Rendah (Prediksi Menunggak Bulan ke-{int(prediction)})"
-            warna = "info"
-            rekomendasi = """
-            ### 🟡 Rekomendasi: DISETUJUI DENGAN MONITORING
-            
-            **Tindakan:**
-            - ✅ Kredit dapat disetujui
-            - ✅ Limit standar (80-90% dari maksimal)
-            - ✅ Tenor normal
-            - ⚠️ Monitoring rutin ketat (2 minggu sekali di awal)
-            - ⚠️ Early warning system diaktifkan
-            
-            **Pertimbangan:**
-            - Risiko relatif rendah tapi perlu waspada
-            - Potensi menunggak di tengah periode
-            - Perlu perhatian khusus
-            
-            **Mitigasi:**
-            - Review berkala setiap 3 bulan
-            - Proactive communication
-            - Tawarkan payment reminder service
-            - Siapkan restructuring plan jika perlu
-            
-            **Tips untuk Nasabah:**
-            - Set auto-debit untuk menghindari lupa
-            - Jaga komunikasi dengan bank
-            - Laporkan jika ada perubahan finansial
-            - Pertimbangkan asuransi perlindungan
-            """
-        
-        # Display result with appropriate color
-        if warna == "success":
-            st.success(kategori)
-        elif warna == "error":
-            st.error(kategori)
-        elif warna == "warning":
-            st.warning(kategori)
-        else:
-            st.info(kategori)
-        
-        # Display confidence
-        max_proba = np.max(prediction_proba)
-        st.markdown(f"**Tingkat Kepercayaan Prediksi:** {max_proba:.1%}")
-        
-        # Display recommendation
-        st.markdown(rekomendasi)
-        
-        # DTI Analysis
-        st.markdown("---")
-        st.subheader("📊 Analisis Debt-to-Income Ratio (DTI)")
-        
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            # DTI Gauge
-            fig_dti = go.Figure(go.Indicator(
-                mode="gauge+number+delta",
-                value=debt_to_income_ratio,
-                domain={'x': [0, 1], 'y': [0, 1]},
-                title={'text': "DTI Ratio (%)"},
-                delta={'reference': 30},
-                gauge={
-                    'axis': {'range': [None, 100]},
-                    'bar': {'color': "darkblue"},
-                    'steps': [
-                        {'range': [0, 30], 'color': "#2ecc71"},
-                        {'range': [30, 40], 'color': "#f1c40f"},
-                        {'range': [40, 50], 'color': "#e67e22"},
-                        {'range': [50, 100], 'color': "#e74c3c"}
-                    ],
-                    'threshold': {
-                        'line': {'color': "red", 'width': 4},
-                        'thickness': 0.75,
-                        'value': 50
-                    }
-                }
-            ))
-            st.plotly_chart(fig_dti, use_container_width=True)
-        
-        with col2:
-            st.markdown("### Interpretasi DTI")
-            
-            if debt_to_income_ratio < 30:
-                st.success(f"""
-                **DTI: {debt_to_income_ratio:.1f}% - SANGAT BAIK** ✅
-                
-                - Kemampuan bayar sangat baik
-                - Masih banyak ruang untuk pengeluaran lain
-                - Risiko stress finansial rendah
-                - Buffer cukup untuk emergency
-                """)
-            elif debt_to_income_ratio < 40:
-                st.info(f"""
-                **DTI: {debt_to_income_ratio:.1f}% - BAIK** 🟢
-                
-                - Kemampuan bayar masih memadai
-                - Perlu hati-hati dengan pengeluaran
-                - Sedikit ruang untuk emergency
-                - Disarankan tidak menambah utang
-                """)
-            elif debt_to_income_ratio < 50:
-                st.warning(f"""
-                **DTI: {debt_to_income_ratio:.1f}% - PERHATIAN** 🟡
-                
-                - Beban utang cukup tinggi
-                - Risiko stress finansial meningkat
-                - Sangat sedikit ruang untuk emergency
-                - JANGAN tambah utang baru
-                """)
-            else:
-                st.error(f"""
-                **DTI: {debt_to_income_ratio:.1f}% - BAHAYA** 🔴
-                
-                - Beban utang sangat tinggi
-                - Risiko kredit macet sangat besar
-                - Tidak ada buffer untuk emergency
-                - Perlu restrukturisasi utang segera
-                """)
-        
-        # Probability Distribution
-        st.markdown("---")
-        st.subheader("📊 Distribusi Probabilitas Prediksi")
-        
-        # Get class labels
-        classes = model.classes_
-        class_labels = [f"Bulan {int(c)}" if c > 0 else "Lancar" for c in classes]
-        
-        # Create bar chart
-        fig_proba = go.Figure(data=[
-            go.Bar(
-                x=class_labels,
-                y=prediction_proba,
-                text=[f'{p:.1%}' for p in prediction_proba],
-                textposition='auto',
-                marker=dict(
-                    color=prediction_proba,
-                    colorscale='RdYlGn_r',
-                    showscale=True,
-                    colorbar=dict(title="Probabilitas")
-                )
-            )
-        ])
-        fig_proba.update_layout(
-            xaxis_title="Prediksi Bulan Menunggak",
-            yaxis_title="Probabilitas",
-            yaxis=dict(range=[0, 1]),
-            showlegend=False
-        )
-        st.plotly_chart(fig_proba, use_container_width=True)
-        
-        # Display input summary
-        st.markdown("---")
-        st.subheader("📝 Ringkasan Data Input")
-        
-        col1, col2, col3 = st.columns(3)
-        
-        with col1:
-            st.markdown("### 💰 Data Finansial")
-            st.markdown(f"""
-            - **Pendapatan Bulanan:** Rp {pendapatan_bulanan:,.0f}
-            - **Total Pinjaman:** Rp {total_pinjaman:,.0f}
-            - **Angsuran Bulanan:** Rp {angsuran_bulanan:,.0f}
-            - **DTI Ratio:** {debt_to_income_ratio:.1f}%
-            - **Credit Score:** {riwayat_kredit_score}
-            - **Pinjaman Aktif:** {jumlah_pinjaman_aktif}
-            """)
-        
-        with col2:
-            st.markdown("### 👤 Data Demografis")
-            st.markdown(f"""
-            - **Usia:** {usia} tahun
-            - **Jumlah Tanggungan:** {jumlah_tanggungan}
-            - **Lama Bekerja:** {lama_bekerja_tahun} tahun
-            - **Status Pekerjaan:** {status_pekerjaan}
-            - **Kepemilikan Rumah:** {kepemilikan_rumah}
-            - **Pendidikan:** {pendidikan}
-            """)
-        
-        with col3:
-            st.markdown("### 📈 Analisis Rasio")
-            
-            # Calculate ratios
-            loan_to_income = (total_pinjaman / (pendapatan_bulanan * 12)) * 100
-            installment_to_loan = (angsuran_bulanan / total_pinjaman) * 100
-            
-            st.markdown(f"""
-            - **Loan-to-Income:** {loan_to_income:.1f}%
-            - **Angsuran/Pinjaman:** {installment_to_loan:.2f}%
-            - **Sisa Income:** Rp {pendapatan_bulanan - angsuran_bulanan:,.0f}
-            - **% Sisa Income:** {((pendapatan_bulanan - angsuran_bulanan) / pendapatan_bulanan * 100):.1f}%
-            """)
-            
-            if loan_to_income > 500:
-                st.error("⚠️ Loan-to-income terlalu tinggi!")
-            elif loan_to_income > 300:
-                st.warning("⚠️ Loan-to-income cukup tinggi")
-            else:
-                st.success("✅ Loan-to-income wajar")
-
-# Menu: Beranda (Default)
-else:
-    st.title("💰 Sistem Prediksi Kemampuan Bayar Angsuran")
-    
-    st.markdown("""
-    ## Selamat Datang di Credit Risk Analysis System! 👋
-    
-    Aplikasi ini menggunakan **Machine Learning** untuk memprediksi kemampuan nasabah dalam membayar angsuran dan mengidentifikasi potensi kredit macet.
-    """)
-    
-    # Feature highlights
-    col1, col2, col3 = st.columns(3)
-    
-    with col1:
-        st.info(f"""
-        ### 🎯 Akurat
-        Model dengan akurasi **{accuracy:.1%}** menggunakan Random Forest
-        """)
-    
-    with col2:
-        st.success("""
-        ### 🚀 Cepat
-        Analisis risiko dalam hitungan detik
-        """)
-    
-    with col3:
-        st.warning("""
-        ### 📊 Komprehensif
-        Analisis 12 parameter finansial & demografis
-        """)
-    
-    st.markdown("---")
-    
-    # Quick start guide
-    st.subheader("🚀 Panduan Cepat")
-    
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        st.markdown("""
-        ### 📖 Untuk Pengguna Baru:
-        
-        1. **Baca Pengenalan** - Pahami cara kerja sistem
-        2. **Pelajari Faktor Risiko** - Ketahui indikator kredit macet
-        3. **Lakukan Analisis** - Input data dan lihat prediksi
-        
-        👉 Mulai dari menu **"📚 Pengenalan Aplikasi"**
-        """)
-    
-    with col2:
-        st.markdown("""
-        ### ⚡ Untuk Analis Berpengalaman:
-        
-        1. Pilih menu **"🔬 Prediksi Angsuran"**
-        2. Input 12 parameter nasabah di sidebar
-        3. Klik tombol **"Analisis Risiko"**
-        4. Review hasil dan rekomendasi tindakan
-        
-        👉 Langsung ke menu **"🔬 Prediksi Angsuran"**
-        """)
-    
-    st.markdown("---")
-    
-    # Key Metrics Dashboard
-    st.subheader("📊 Dashboard Statistik")
-    
-    col1, col2, col3, col4 = st.columns(4)
-    
-    with col1:
-        st.metric("Akurasi Model", f"{accuracy:.1%}")
-    
-    with col2:
-        lancar_pct = (df['bulan_menunggak'] == 0).sum() / len(df) * 100
-        st.metric("Nasabah Lancar", f"{lancar_pct:.1f}%")
-    
-    with col3:
-        avg_dti = df['debt_to_income_ratio'].mean()
-        st.metric("Rata-rata DTI", f"{avg_dti:.1f}%")
-    
-    with col4:
-        avg_score = df['riwayat_kredit_score'].mean()
-        st.metric("Avg Credit Score", f"{avg_score:.0f}")
-    
-    # Risk Distribution Chart
-    st.markdown("---")
-    st.subheader("📈 Distribusi Kategori Risiko")
-    
-    risk_counts = df['kategori_risiko'].value_counts()
-    
-    fig_risk = px.bar(
-        x=risk_counts.index,
-        y=risk_counts.values,
-        labels={'x': 'Kategori Risiko', 'y': 'Jumlah Nasabah'},
-        color=risk_counts.index,
-        color_discrete_map={
-            'Lancar': '#2ecc71',
-            'Risiko Rendah (7-12 bulan)': '#f39c12',
-            'Risiko Sedang (4-6 bulan)': '#e67e22',
-            'Risiko Tinggi (1-3 bulan)': '#e74c3c'
-        }
-    )
-    fig_risk.update_layout(showlegend=False)
-    st.plotly_chart(fig_risk, use_container_width=True)
-    
-    st.markdown("---")
-    
-    # Important notice
-    st.error("""
-    ### ⚠️ DISCLAIMER PENTING
-    
-    Aplikasi ini adalah **alat bantu analisis** yang memberikan prediksi berdasarkan data historis dan pola statistik. 
-    
-    **Keputusan kredit final HARUS mempertimbangkan:**
-    - ✅ Verifikasi dokumen lengkap dan akurat
-    - ✅ Wawancara langsung dengan calon nasabah
-    - ✅ Site visit dan survey lapangan
-    - ✅ Analisis mendalam kondisi bisnis/pekerjaan
-    - ✅ Aspek karakter dan komitmen nasabah
-    - ✅ Kondisi ekonomi dan industri terkini
-    - ✅ Kebijakan internal perusahaan
-    
-    **TIDAK BOLEH** menggunakan hasil prediksi sebagai **satu-satunya** dasar keputusan.
-    """)
-    
-    st.markdown("---")
-    
-    # Call to action
-    st.success("""
-    ### 💡 Siap Memulai Analisis?
-    
-    Pilih salah satu menu di sidebar:
-    - **ℹ️ Tentang** - Informasi sistem dan teknologi
-    - **📚 Pengenalan Aplikasi** - Cara kerja dan best practices
-    - **⚠️ Faktor Risiko** - Pelajari indikator kredit macet
-    - **🔬 Prediksi Angsuran** - Mulai analisis risiko kredit!
-    """)
-
-# Footer
-st.markdown("---")
-st.markdown("""
-<div style='text-align: center'>
-    <p>🏦 Aplikasi ini untuk tujuan analisis risiko kredit internal. Keputusan final harus melibatkan verifikasi dan analisis mendalam.</p>
-    <p>© 2024 Credit Risk Analysis System | Dibuat dengan 💼 menggunakan Streamlit & Machine Learning</p>
-</div>
-""", unsafe_allow_html=True)
+        # Prepare input
+        input_data = {
+            'status_checking': status_checking,
+            'duration': duration,
+            'credit_history': credit_history,
+            'purpose': purpose,
+            'credit_amount': credit_amount,
+            'savings': savings,
+            'employment': employment,
+            'installment_rate': installment_rate,
+            'personal_status': personal_status,
+            'other_debtors': other_debtors,
+            'residence_since': residence_since,
+            'property': property,
+            'age': age,
+            'other_installments': other_installments,
+            'housing': housing,
+            'existing_credits': existing_credits,
+            'job': job,
+            'num_dependents': num_dependents,
+            'telephone': telephone,
+            'foreign_worker': foreign_worker
