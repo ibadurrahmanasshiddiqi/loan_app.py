@@ -641,28 +641,55 @@ elif menu == "🔬 Prediksi Kredit":
     
     # Prediction
     if predict_button:
-        st.markdown("---")
-        st.subheader("🎯 Hasil Analisis Risiko")
-        
-        # Prepare input
-        input_data = {
-            'status_checking': status_checking,
-            'duration': duration,
-            'credit_history': credit_history,
-            'purpose': purpose,
-            'credit_amount': credit_amount,
-            'savings': savings,
-            'employment': employment,
-            'installment_rate': installment_rate,
-            'personal_status': personal_status,
-            'other_debtors': other_debtors,
-            'residence_since': residence_since,
-            'property': property,
-            'age': age,
-            'other_installments': other_installments,
-            'housing': housing,
-            'existing_credits': existing_credits,
-            'job': job,
-            'num_dependents': num_dependents,
-            'telephone': telephone,
-            'foreign_worker': foreign_worker
+    st.markdown("---")
+    st.subheader("🎯 Hasil Analisis Risiko")
+
+    # =========================
+    # Prepare input data
+    # =========================
+    input_data = {
+        'status_checking': status_checking,
+        'duration': duration,
+        'credit_history': credit_history,
+        'purpose': purpose,
+        'credit_amount': credit_amount,
+        'savings': savings,
+        'employment': employment,
+        'installment_rate': installment_rate,
+        'personal_status': personal_status,
+        'other_debtors': other_debtors,
+        'residence_since': residence_since,
+        'property': property,
+        'age': age,
+        'other_installments': other_installments,
+        'housing': housing,
+        'existing_credits': existing_credits,
+        'job': job,
+        'num_dependents': num_dependents,
+        'telephone': telephone,
+        'foreign_worker': foreign_worker
+    }
+
+    # Convert to DataFrame
+    input_df = pd.DataFrame([input_data])
+
+    # Encode categorical features
+    for col, le in le_dict.items():
+        input_df[col] = le.transform(input_df[col].astype(str))
+
+    # Scaling
+    input_scaled = scaler.transform(input_df)
+
+    # Predict
+    prediction = model.predict(input_scaled)[0]
+    prediction_proba = model.predict_proba(input_scaled)[0]
+
+    # =========================
+    # Output
+    # =========================
+    if prediction == 0:
+        st.success("🟢 **GOOD CREDIT (Risiko Rendah)**")
+        st.metric("Probabilitas Lancar", f"{prediction_proba[0]*100:.1f}%")
+    else:
+        st.error("🔴 **BAD CREDIT (Risiko Tinggi / Default)**")
+        st.metric("Probabilitas Default", f"{prediction_proba[1]*100:.1f}%")
